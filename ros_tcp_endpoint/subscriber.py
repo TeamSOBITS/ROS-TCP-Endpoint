@@ -44,12 +44,44 @@ class RosSubscriber(RosReceiver):
         self.queue_size = queue_size
 
         qos_profile = QoSProfile(depth=queue_size)
+        qos_profile.reliability = self._resolve_reliability()
 
         # Start Subscriber listener function
         self.subscription = self.create_subscription(
             self.msg, self.topic, self.send, qos_profile  # queue_size
         )
         self.subscription
+
+    def _resolve_reliability(self):
+        """Pick a reliability policy that matches whoever is publishing this topic.
+
+        A RELIABLE subscription does not match a BEST_EFFORT publisher, so the
+        subscription would silently receive nothing. Rather than guessing from
+        the message type, ask the graph what the current publishers advertise
+        and mirror it. BEST_EFFORT wins if any publisher is best-effort, since
+        that is the only policy compatible with all of them.
+
+        Falls back to a message-type heuristic when no publisher has appeared
+        yet -- Unity often subscribes before the camera driver has started.
+        """
+        try:
+            publishers = self.get_publishers_info_by_topic(self.topic)
+        except (NotImplementedError, ValueError):
+            publishers = []
+
+        if publishers:
+            if any(
+                p.qos_profile.reliability == QoSReliabilityPolicy.BEST_EFFORT
+                for p in publishers
+            ):
+                return QoSReliabilityPolicy.BEST_EFFORT
+            return QoSReliabilityPolicy.RELIABLE
+
+        # No publisher yet: sensor streams are best-effort far more often than
+        # not, so default those to BEST_EFFORT and everything else to RELIABLE.
+        if self.msg.__name__ in ("Image", "CompressedImage", "PointCloud2", "LaserScan"):
+            return QoSReliabilityPolicy.BEST_EFFORT
+        return QoSReliabilityPolicy.RELIABLE
 
     def send(self, data):
         """
